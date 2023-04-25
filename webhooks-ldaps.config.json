@@ -1,6 +1,13 @@
 {
   "bot_token": "botAPI_KEY",
+  "ldaps_server" : "ldaps://10.10.10.10",
   "ldap_user": "LDAP_DOMAIN\\LDAP_USER",
   "ldap_password": "LDAP_PASSWORD",
-  "admin_chat" : 45251901
+  "ldap_dn": "OU=siem-response,OU=pt,OU=Технические УЗ,DC=z-lab,DC=me",
+  "admin_chat" : 45251901,
+  "syslog_server" : "syslog.server.org",
+  "syslog_enabled" : false,
+  "syslog_port" : 514,
+  "log_dir": "/path/to/log/store",
+  "log_rotate_history_in_days": 7
 }

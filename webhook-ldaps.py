@@ -1,27 +1,28 @@
 import json
+import os
 import random
 import threading
 from datetime import time, datetime
 import logging.handlers
-
+from logging.handlers import TimedRotatingFileHandler
 import ldap3
 import nest_asyncio
 from ldap3 import Server, Connection, ALL, MODIFY_REPLACE
 import logging
 import asyncio
 import sqlite3
-from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
-# import aiogram
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, filters, Application, CallbackQueryHandler  # Filters,
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application
 
 import time
 from flask import Flask, request
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-import logging
 
 logger = logging.getLogger()
+
+# DEV ENV!!! Disable multi-login alert
 logging.disable(logging.CRITICAL)
 logging.disable(logging.ERROR)
 
@@ -34,6 +35,47 @@ with open('webhooks-ldaps.config.json') as config_file:
 
 bot_token = config_data['bot_token']
 admin_chat_id = config_data['admin_chat']  # ID чата куда слать сообщения
+syslog_server = config_data['syslog_server']  # Адрес MPAgent на котором запущен syslog
+syslog_port = config_data['syslog_port']  # Адрес MPAgent на котором запущен syslog
+log_dir = config_data['log_dir']
+
+if not os.path.exists(config_data['log_dir']):
+    os.makedirs(config_data['log_dir'])
+
+logfile = f"{config_data['log_dir']}/pt-siem-webhook-ldaps.log"
+log_rotate_history = config_data['log_rotate_history_in_days']
+
+handler = TimedRotatingFileHandler(logfile,
+                                   when="d",
+                                   interval=1,
+                                   backupCount=log_rotate_history)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+
+def print_log(msg, msg_level):
+    now = datetime.now()
+    print(now.strftime("%Y-%m-%d %H:%M:%S") + ": " + str(msg) + '\n')
+    logger.log(msg=str(msg), level=msg_level)
+    if config_data["syslog_enabled"]:
+        sendSyslog(str(msg), 1)
+
+
+def sendSyslog(msg, delay):
+    print(f"Формируется сообщение :{str(datetime.now())}")
+    time.sleep(delay)
+    # BUILD
+    newloggerid = ''.join(random.choice('abcdef1234567890') for _ in range(7))
+    logger = f'logger_{newloggerid}'
+    syslog = logging.getLogger(logger)
+    handler = logging.handlers.SysLogHandler(address=(syslog_server, 514))
+
+    # SEND
+    syslog.setLevel(logging.INFO)
+    syslog.addHandler(handler)
+    syslog.info(msg)
+    print(f"Передано сообщение :{str(datetime.now())}")
 
 
 def add_lock_request(src_host, dst_host, subject_name, correlation_name):
@@ -64,9 +106,7 @@ def get_last_id():
         return row[0] if row and row[0] else 0
 
 
-
 async def response_button(update, context):
-
     if not context:
         return
     query = update.callback_query
@@ -117,63 +157,11 @@ def start(update, context):
     update.message.reply_text('Hello! Welcome to my bot.')
 
 
-
 application = Application.builder().token(bot_token).read_timeout(2).write_timeout(2).build()
-
-
-syslog_server = "10.10.10.250"  # Адрес MPAgent на котором запущен syslog
-
 
 app = Flask(__name__)
 
 events = []
-
-logger = logging.getLogger("PTGetADDate")
-logger.setLevel(logging.DEBUG)
-
-
-def sendSyslog(msg, delay):
-    print(f"Формируется сообщение :{str(datetime.now())}")
-    time.sleep(delay)
-    # BUILD
-    newloggerid = ''.join(random.choice('abcdef1234567890') for _ in range(7))
-    logger = f'logger_{newloggerid}'
-    syslog = logging.getLogger(logger)
-    handler = logging.handlers.SysLogHandler(address=(syslog_server, 514))
-
-    # SEND
-    syslog.setLevel(logging.INFO)
-    syslog.addHandler(handler)
-    syslog.info(msg)
-    print(f"Передано сообщение :{str(datetime.now())}")
-
-
-def collect(target, settings, savepoint):
-    for msg in events:
-        msgtime = datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
-        yield {
-            "action"            : "login",
-            "src.ip"            : msg["ip"],
-            "event_src.host"    : msg["host"],
-            "subject"           : "account",
-            "subject.name"      : msg["subject"],
-            "object.name"       : msg["object"],
-            "status"            : "success",
-            "event_src.category": "Other",
-            "event_src.title"   : msg["payload"]["title"],
-            "event_src.vendor"  : msg["payload"]["vendor"],
-            "importance"        : "info",
-            "msgid"             : msg["uuid"],
-            "object.type"       : "normalize",
-            "time"              : msgtime
-        }
-        events.remove(msg)
-
-    # has_more is False
-    yield False
-
-    # savepoint is not modified
-    yield None
 
 
 @app.route('/')
@@ -188,7 +176,7 @@ def eventsEndpoint():
 
 
 @app.route('/getEndpoint', methods=['GET'])
-def getEndpoint(): # async
+def getEndpoint():  # async
     try:
         # print(request)
         data = request.args['payload']
@@ -198,15 +186,16 @@ def getEndpoint(): # async
         src_host = data.split("|")[3]
         dst_host = data.split("|")[4]
 
-        print(f"Response fired for:\n"
+        print_log(f"Response fired for:\n"
               f"Correlation {correlation_name}.\n"
               f"Subject: {subject_name}.\n"
               f"Domain: {subject_domain}.\n"
               f"src: {src_host}.\n"
-              f"dst: {dst_host}.")
-        print(f"Account will be blocked in LDAP: {subject_name}")
+              f"dst: {dst_host}.", logging.INFO)
+        print_log(f"Account will be blocked in LDAP: {subject_name}", logging.INFO)
 
-        add_lock_request(src_host=src_host, dst_host=dst_host, subject_name=subject_name, correlation_name=correlation_name)
+        add_lock_request(src_host=src_host, dst_host=dst_host, subject_name=subject_name,
+                         correlation_name=correlation_name)
         current_id = get_last_id()
 
         text = f"🚨PT MaxPatrol SIEM🚨:\n---\nСобытие номер: {current_id}\n---\n" \
@@ -222,8 +211,8 @@ def getEndpoint(): # async
 
             try:
                 asyncio.run(application.bot.send_message(chat_id=admin_chat_id, text=text))
-            except:
-                ""
+            except Exception as e:
+                print_log(f"Execption: {e}", logging.ERROR)
         else:
             locks_account[str(current_id)] = {"dst_host": dst_host, "src_host": src_host, "subject_name": subject_name}
 
@@ -234,26 +223,21 @@ def getEndpoint(): # async
 
             try:
                 asyncio.run(application.bot.send_message(chat_id=admin_chat_id, text=text, reply_markup=reply_markup))
-            except:
-                ""
-        syslog_msg = """{"payload": {"title": f"Response on account {subject_name}.", "vendor": "Positive"}, "ip": "10.10.10.10",
-                        "host"   : src_host, "subject": "account", "object": "host",
-                        "uuid"   : "02d4f5fd-46c8-48ac-851c-6c45e10a240d", "time": "1661940112"}"""
-
-        sendSyslog(syslog_msg.replace("{subject_name}", subject_name), 0)
+            except Exception as e:
+                print_log(f"Execption: {e}", logging.ERROR)
 
         return "response OK"
     except Exception as e:
-        print(f"Execption: {e}")
+        print_log(f"Execption: {e}", logging.ERROR)
         return "response not OK."
 
 
 def ldap_response(dst_host, src_host, subject_name):
-    print(f"ldap_response fired: subject_name={subject_name}, src_host={src_host}, dst_host={dst_host}")
-    server_address = 'ldaps://10.10.10.10'
+    print_log(f"ldap_response fired: subject_name={subject_name}, src_host={src_host}, dst_host={dst_host}", logging.INFO)
+    server_address = config_data["ldaps_server"]
     username = config_data['ldap_user']
     password = config_data['ldap_password']
-    dn = 'OU=siem-response,OU=pt,OU=Технические УЗ,DC=z-lab,DC=me'
+    dn = config_data["ldap_dn"]
     server = Server(server_address, get_info=ALL)
     conn = Connection(server, user=username, password=password, auto_bind=True)
     accounts = [subject_name, f"{src_host}$", f"{dst_host}$"]
@@ -262,17 +246,17 @@ def ldap_response(dst_host, src_host, subject_name):
 
         if conn.entries:
             account_dn = conn.entries[0].entry_dn
-            print(f'Account {account_to_disable} DN is: {account_dn}.')
+            print_log(f'Account {account_to_disable} DN is: {account_dn}.', logging.INFO)
             account_classes = conn.entries[0]['objectClass'].values
             account_class = "computer" if "computer" in account_classes else "user"
             block_code = 2 if account_class == "computer" else 514
-            print(f'Account {account_to_disable} class is: {account_class}.')
+            print_log(f'Account {account_to_disable} class is: {account_class}.', logging.INFO)
 
             return_code = conn.modify(account_dn, {'userAccountControl': [(MODIFY_REPLACE, [f'{block_code}'])]})
-            print(f'Account {account_to_disable} has been disabled.')
-            print(f"Account blocked action ended on: {account_to_disable}. Return code: {return_code}")
+            print_log(f'Account {account_to_disable} has been disabled.', logging.INFO)
+            print_log(f"Account blocked action ended on: {account_to_disable}. Return code: {return_code}", logging.INFO)
         else:
-            print(f'User {account_to_disable} not found.')
+            print_log(f'User {account_to_disable} not found.', logging.INFO)
     conn.unbind()
 
     """
@@ -302,4 +286,3 @@ threading.Thread(target=lambda: app.run(debug=False, host='10.10.10.196', port=5
 print("telegram_bot")
 application.run_polling(timeout=86000, poll_interval=86000, pool_timeout=86000)
 # executor.start_polling(dp)
-
