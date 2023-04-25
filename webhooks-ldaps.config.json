@@ -1,0 +1,6 @@
+{
+  "bot_token": "botAPI_KEY",
+  "ldap_user": "LDAP_DOMAIN\\LDAP_USER",
+  "ldap_password": "LDAP_PASSWORD",
+  "admin_chat" : 45251901
+}
